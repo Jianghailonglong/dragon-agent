@@ -1,0 +1,30 @@
+[project]
+name = "dragon-agent"
+version = "0.1.0"
+description = "A production-grade AI Agent framework"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "tiktoken>=0.7.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+dragon = "cli.dragon:main"
+
+[tool.setuptools.packages.find]
+include = ["cli*", "core*", "config*", "gateway*", "session*", "channels*", "providers*", "resilience*", "intelligence*", "orchestration*", "tools*", "web*"]
+exclude = ["claw0*", "nanobot*", "workspace*", "tests*", "docs*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

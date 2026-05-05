@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Dragon Agent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    overflow: hidden;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #2a2a2a;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #1a1a1a;
+  }
+  header .logo { font-size: 24px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .status {
+    margin-left: auto;
+    font-size: 12px;
+    color: #666;
+  }
+  #chat {
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    scroll-behavior: smooth;
+  }
+  .msg {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.6;
+    font-size: 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: #2563eb;
+    color: white;
+    border-bottom-right-radius: 4px;
+    max-height: 400px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-bottom-left-radius: 4px;
+    max-height: 600px;
+  }
+  .msg.system {
+    align-self: center;
+    background: transparent;
+    color: #666;
+    font-size: 12px;
+    padding: 4px 12px;
+    max-height: none;
+  }
+  #input-area {
+    padding: 12px 24px;
+    border-top: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    display: flex;
+    gap: 12px;
+    min-height: 60px;
+    max-height: 250px;
+  }
+  #input {
+    flex: 1;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    font-size: 14px;
+    outline: none;
+    resize: none;
+    font-family: inherit;
+    min-height: 44px;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+  #input:focus { border-color: #2563eb; }
+  #send {
+    padding: 12px 24px;
+    border-radius: 8px;
+    border: none;
+    background: #2563eb;
+    color: white;
+    font-size: 14px;
+    cursor: pointer;
+    font-weight: 600;
+    flex-shrink: 0;
+    align-self: flex-end;
+  }
+  #send:hover { background: #1d4ed8; }
+  #send:disabled { background: #333; cursor: not-allowed; }
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #555;
+    border-top-color: #2563eb;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Mobile optimizations */
+  @media (max-width: 768px) {
+    header {
+      padding: 12px 16px;
+    }
+    header h1 {
+      font-size: 16px;
+    }
+    #chat {
+      padding: 16px;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 90%;
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+    #input-area {
+      padding: 12px 16px;
+      gap: 8px;
+    }
+    #input {
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+    #send {
+      padding: 10px 16px;
+      font-size: 13px;
+    }
+  }
+
+  /* Ensure content is visible on very small screens */
+  @media (max-height: 500px) {
+    #input-area {
+      min-height: 50px;
+      max-height: 150px;
+      padding: 8px 16px;
+    }
+    #input {
+      min-height: 36px;
+      max-height: 100px;
+      font-size: 14px;
+    }
+    #send {
+      padding: 8px 16px;
+      font-size: 14px;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">&#x1f409;</span>
+  <h1>Dragon Agent</h1>
+  <span class="status" id="status">Connected</span>
+</header>
+
+<div id="chat"></div>
+
+<div id="input-area">
+  <textarea id="input" rows="1" placeholder="Type your message..." autofocus></textarea>
+  <button id="send">Send</button>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+let waiting = false;
+let waitTimeout = null;
+
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function addThinking() {
+  removeThinking();
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.id = 'thinking';
+  div.innerHTML = '<span class="spinner"></span> Thinking...';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function removeThinking() {
+  const el = document.getElementById('thinking');
+  if (el) el.remove();
+}
+
+function setWaiting(v) {
+  waiting = v;
+  sendBtn.disabled = v;
+  input.disabled = v;
+  if (!v) {
+    input.focus();
+    if (waitTimeout) { clearTimeout(waitTimeout); waitTimeout = null; }
+  }
+}
+
+// SSE connection with reconnection handling
+let evtSource = null;
+
+function connectSSE() {
+  if (evtSource) {
+    evtSource.close();
+  }
+
+  evtSource = new EventSource('/api/events');
+
+  evtSource.onopen = () => {
+    statusEl.textContent = 'Connected';
+    statusEl.style.color = '#666';
+    // If we were waiting when the connection dropped, reset the UI
+    if (waiting) {
+      removeThinking();
+      addMessage('system', 'Connection restored. Response may have been lost — please resend if needed.');
+      setWaiting(false);
+    }
+  };
+
+  evtSource.onmessage = (e) => {
+    removeThinking();
+    addMessage('assistant', e.data);
+    setWaiting(false);
+  };
+
+  evtSource.onerror = () => {
+    statusEl.textContent = 'Disconnected — reconnecting...';
+    statusEl.style.color = '#ef4444';
+    // EventSource will auto-reconnect; don't reset waiting here
+    // (onopen will handle it if the connection recovers)
+  };
+}
+
+connectSSE();
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text || waiting) return;
+
+  addMessage('user', text);
+  input.value = '';
+  input.style.height = 'auto'; // Reset textarea height
+  setWaiting(true);
+  addThinking();
+
+  // Safety timeout: if no response in 180s, reset UI
+  if (waitTimeout) clearTimeout(waitTimeout);
+  waitTimeout = setTimeout(() => {
+    if (waiting) {
+      removeThinking();
+      addMessage('system', 'Response timed out. Please resend your message.');
+      setWaiting(false);
+    }
+  }, 180000);
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    if (!resp.ok) throw new Error('Request failed');
+  } catch (err) {
+    removeThinking();
+    addMessage('assistant', 'Error: Failed to send message.');
+    setWaiting(false);
+  }
+}
+
+sendBtn.addEventListener('click', sendMessage);
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Auto-resize textarea
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 150) + 'px';
+});
+
+</script>
+</body>
+</html>
