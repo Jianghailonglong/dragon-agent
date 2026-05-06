@@ -208,3 +208,137 @@ async def test_hook_lifecycle():
     assert result.content == "[finalized] hi"
     assert "before_0" in hook.events
     assert "after_0" in hook.events
+
+
+class SlowTool(BaseTool):
+    """A tool that takes a bit of time, used to verify concurrent execution."""
+    def __init__(self, name: str, delay: float = 0.01):
+        self._name = name
+        self._delay = delay
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def description(self):
+        return f"Slow tool {self._name}"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        await asyncio.sleep(self._delay)
+        return f"result_{self._name}"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tool_execution():
+    """Multiple tool calls should be executed concurrently."""
+    import time
+
+    tool_a = SlowTool("a", delay=0.05)
+    tool_b = SlowTool("b", delay=0.05)
+
+    provider = MockProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                {"id": "tc1", "name": "a", "input": {}},
+                {"id": "tc2", "name": "b", "input": {}},
+            ],
+            stop_reason="tool_use",
+            usage={"input_tokens": 10, "output_tokens": 5},
+        ),
+        LLMResponse(content="Done!", stop_reason="end_turn", usage={"input_tokens": 10, "output_tokens": 3}),
+    ])
+
+    tools = ToolRegistry()
+    tools.register(tool_a)
+    tools.register(tool_b)
+
+    spec = AgentRunSpec(
+        messages=[{"role": "user", "content": "run both"}],
+        tools=tools,
+        provider=provider,
+    )
+
+    start = time.monotonic()
+    result = await AgentRunner().run(spec)
+    elapsed = time.monotonic() - start
+
+    assert result.content == "Done!"
+    # If concurrent, should take ~50ms, not ~100ms
+    assert elapsed < 0.15  # generous margin for CI
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tool_error_isolation():
+    """One failing tool should not block others."""
+    class FailTool(BaseTool):
+        @property
+        def name(self):
+            return "fail"
+
+        @property
+        def description(self):
+            return "Always fails"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            raise RuntimeError("boom")
+
+    provider = MockProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                {"id": "tc1", "name": "fail", "input": {}},
+                {"id": "tc2", "name": "echo", "input": {"text": "hi"}},
+            ],
+            stop_reason="tool_use",
+            usage={"input_tokens": 10, "output_tokens": 5},
+        ),
+        LLMResponse(content="Handled", stop_reason="end_turn", usage={"input_tokens": 10, "output_tokens": 3}),
+    ])
+
+    tools = ToolRegistry()
+    tools.register(FailTool())
+    tools.register(EchoTool())
+
+    spec = AgentRunSpec(
+        messages=[{"role": "user", "content": "test"}],
+        tools=tools,
+        provider=provider,
+    )
+
+    result = await AgentRunner().run(spec)
+    # Both tools should have results — one error, one success
+    tool_msgs = [m for m in result.messages if m.get("role") == "user" and isinstance(m.get("content"), list)]
+    assert len(tool_msgs) == 2
+    contents = [m["content"][0]["content"] for m in tool_msgs]
+    assert any("Error" in c or "boom" in c for c in contents)
+    assert any("echoed: hi" in c for c in contents)
+
+
+def test_structured_logger_emits_events(caplog):
+    """StructuredLogger should emit JSON log entries."""
+    import logging
+    from core.structured_logger import StructuredLogger
+
+    slog = StructuredLogger("test")
+    slog.set_context(session_key="test:session")
+
+    with caplog.at_level(logging.INFO, logger="test"):
+        slog.llm_call_end("claude-sonnet", 100, 50, 250.5, "end_turn")
+
+    assert len(caplog.records) == 1
+    import json
+    record = json.loads(caplog.records[0].message)
+    assert record["event"] == "llm_call_end"
+    assert record["model"] == "claude-sonnet"
+    assert record["input_tokens"] == 100
+    assert record["session_key"] == "test:session"

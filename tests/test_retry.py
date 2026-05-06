@@ -1,7 +1,8 @@
 import pytest
 import asyncio
 
-from resilience.retry import RetryOnion, TokenOverflowError, RateLimitError, LLMAPIError
+from resilience.retry import RetryOnion, RateLimitError, LLMAPIError
+from core.runner import TokenOverflowError
 
 
 @pytest.mark.asyncio

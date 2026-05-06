@@ -101,3 +101,34 @@ async def test_delivery_load_from_disk(delivery_dir):
     success = await queue2.retry_pending()
     assert success == 1
     assert sent[0].content == "persisted"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_triggers_delivery_retry(delivery_dir):
+    """HeartbeatService should retry pending deliveries on each cycle."""
+    from orchestration.heartbeat import HeartbeatService
+
+    retry_count = 0
+
+    async def send_fn(msg):
+        nonlocal retry_count
+        retry_count += 1
+        if retry_count <= 1:
+            raise ConnectionError("first fails")
+
+    queue = DeliveryQueue(storage_dir=delivery_dir, send_fn=send_fn)
+    await queue.enqueue(OutboundMessage(channel="cli", chat_id="c1", content="retry me"))
+    assert queue.pending_count() == 1
+
+    # Create heartbeat with very short interval and the delivery queue
+    heartbeat = HeartbeatService(
+        interval_seconds=0.05,
+        delivery_queue=queue,
+    )
+
+    await heartbeat.start()
+    await asyncio.sleep(0.2)  # wait for at least one heartbeat
+    await heartbeat.stop()
+
+    # Delivery should have been retried successfully
+    assert queue.pending_count() == 0

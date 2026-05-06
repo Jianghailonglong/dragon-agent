@@ -1,6 +1,12 @@
 # Environment variables (contains secrets)
 .env
 
+# Claude Code
+.claude/
+
+# OpenSpec
+openspec/
+
 # Logs
 logs/
 *.log
@@ -47,9 +53,12 @@ htmlcov/
 .tox/
 .nox/
 
-# Sessions and delivery
+# Sessions and delivery (runtime data)
 sessions/
 delivery/
+
+# User runtime data
+workspace/
 
 # OS
 .DS_Store

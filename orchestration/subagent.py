@@ -26,6 +26,7 @@ class SubagentTask:
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: datetime | None = None
     error: str = ""
+    event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class SubagentManager:
@@ -70,13 +71,12 @@ class SubagentManager:
         return await self.wait(task_id)
 
     async def wait(self, task_id: str) -> AgentRunResult:
-        """Wait for a subagent task to complete."""
+        """Wait for a subagent task to complete using asyncio.Event."""
         task = self._tasks.get(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
 
-        while task.status in ("pending", "running"):
-            await asyncio.sleep(0.05)
+        await task.event.wait()
 
         if task.status == "failed":
             raise RuntimeError(f"Subagent task failed: {task.error}")
@@ -110,6 +110,8 @@ class SubagentManager:
                 task.error = str(e)
                 task.completed_at = datetime.now()
                 logger.error(f"Subagent {task.id} failed: {e}")
+            finally:
+                task.event.set()
 
     def get_task(self, task_id: str) -> SubagentTask | None:
         return self._tasks.get(task_id)

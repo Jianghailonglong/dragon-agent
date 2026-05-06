@@ -13,12 +13,14 @@ from core.types import InboundMessage, OutboundMessage
 from core.runner import AgentRunner, AgentRunSpec
 from core.hook import AgentHook
 from core.logger import ConversationLogger
+from core.structured_logger import StructuredLogger
 from intelligence.context import ContextBuilder
 from intelligence.skills import SkillsLoader
 from intelligence.dream import Dream
 from intelligence.workspace import UserWorkspace
 from resilience.checkpoint import CheckpointManager
 from resilience.delivery import DeliveryQueue
+from resilience.retry import RetryOnion, RateLimitError, LLMAPIError
 from orchestration.heartbeat import HeartbeatService
 from orchestration.cron import CronScheduler
 
@@ -70,6 +72,7 @@ class AgentLoop:
         self._user_workspace = user_workspace
         self._context_builder = context_builder
         self._skills_loader = skills_loader
+        self._slog = StructuredLogger(__name__)
 
     def _build_user_system_prompt(self, channel: str) -> str:
         """Build system prompt for the current user (resolves per-user workspace)."""
@@ -145,6 +148,9 @@ class AgentLoop:
         return injections if injections else None
 
     async def _process_message(self, msg: InboundMessage, session_key: str) -> None:
+        # Set structured logging context
+        self._slog.set_context(session_key=session_key)
+
         # Set current user for per-user workspace resolution
         if self._user_workspace:
             self._user_workspace.set_current_user(msg.sender_id)
@@ -164,8 +170,7 @@ class AgentLoop:
 
         async def checkpoint_cb(tool_index: int, tool_name: str) -> None:
             self._checkpoint.save_tool_checkpoint(session, tool_index, tool_name)
-            if hasattr(self._channel, 'start_spinner'):
-                self._channel.start_spinner(f"Running {tool_name}")
+            self._channel.start_spinner(f"Running {tool_name}")
 
         async def injection_cb() -> list[dict] | None:
             return await self._drain_injection_queue(session_key)
@@ -187,14 +192,23 @@ class AgentLoop:
         self._checkpoint.begin_user_turn(session)
 
         # Start spinner before running
-        if hasattr(self._channel, 'start_spinner'):
-            self._channel.start_spinner("Thinking")
+        self._channel.start_spinner("Thinking")
+
+        # Create retry onion for resilience
+        retry_onion = RetryOnion(max_retries=3, base_backoff=1.0, max_backoff=30.0)
+
+        def emergency_compact():
+            """Compact messages when token overflow occurs."""
+            return self._runner.govern_context(list(spec.messages), spec)
 
         try:
-            result = await self._runner.run(spec)
+            result = await retry_onion.execute_with_retry(
+                self._runner.run,
+                emergency_compact=emergency_compact,
+                spec=spec,
+            )
         except Exception as e:
-            if hasattr(self._channel, 'stop_spinner'):
-                self._channel.stop_spinner()
+            self._channel.stop_spinner()
             error_msg = f"Error: {e}"
             if self._conv_logger:
                 self._conv_logger.log_error(session_key, error_msg)
@@ -205,9 +219,7 @@ class AgentLoop:
             ))
             return
         finally:
-            # Stop spinner
-            if hasattr(self._channel, 'stop_spinner'):
-                self._channel.stop_spinner()
+            self._channel.stop_spinner()
 
         # Update session with full message history
         session.messages = result.messages

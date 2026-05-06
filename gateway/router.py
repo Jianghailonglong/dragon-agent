@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
@@ -9,6 +10,8 @@ import yaml
 
 from core.types import InboundMessage
 from config.schema import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 
 class TierPriority(IntEnum):
@@ -50,9 +53,17 @@ class GatewayRouter:
     Resolves messages to agent configurations.
     """
 
-    def __init__(self, default_agent: str = "default") -> None:
+    def __init__(
+        self,
+        default_agent: str = "default",
+        configs: dict[str, AgentConfig] | None = None,
+    ) -> None:
         self._bindings: list[Binding] = []
         self._default_agent = default_agent
+        self._configs: dict[str, AgentConfig] = configs or {}
+        # Ensure default config exists
+        if default_agent not in self._configs:
+            self._configs[default_agent] = AgentConfig(name=default_agent)
 
     def add_binding(self, binding: Binding) -> None:
         """Add a routing binding."""
@@ -60,21 +71,45 @@ class GatewayRouter:
         # Keep sorted by priority
         self._bindings.sort(key=lambda b: b.tier_priority)
 
-    def resolve(self, msg: InboundMessage) -> str:
+    def resolve(self, msg: InboundMessage) -> AgentConfig:
         """
-        Resolve message to an agent name.
-        Returns the agent name from the highest-priority matching binding.
+        Resolve message to an AgentConfig.
+        Returns the config from the highest-priority matching binding.
+        Falls back to default config if no binding matches or config not found.
         """
         for binding in self._bindings:
             if binding.matches(msg):
-                return binding.agent
-        return self._default_agent
+                config = self._configs.get(binding.agent)
+                if config:
+                    return config
+                logger.warning(f"Agent config '{binding.agent}' not found, using default")
+                return self._configs[self._default_agent]
+        return self._configs[self._default_agent]
 
     @classmethod
-    def from_yaml(cls, path: str | Path, default_agent: str = "default") -> GatewayRouter:
-        """Load bindings from a YAML file."""
+    def from_yaml(
+        cls,
+        path: str | Path,
+        default_agent: str = "default",
+        configs_dir: str | Path | None = None,
+    ) -> GatewayRouter:
+        """Load bindings from a YAML file, optionally loading agent configs from a directory."""
         p = Path(path)
-        router = cls(default_agent=default_agent)
+        configs: dict[str, AgentConfig] = {}
+
+        # Load agent configs from directory if provided
+        if configs_dir:
+            configs_path = Path(configs_dir)
+            if configs_path.is_dir():
+                for config_file in configs_path.glob("*.yaml"):
+                    agent_name = config_file.stem
+                    try:
+                        agent_data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+                        configs[agent_name] = AgentConfig(name=agent_name, **agent_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to load agent config {config_file}: {e}")
+
+        router = cls(default_agent=default_agent, configs=configs)
 
         if not p.exists():
             return router

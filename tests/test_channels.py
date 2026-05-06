@@ -48,3 +48,10 @@ async def test_fake_channel():
     out = OutboundMessage(channel="fake", chat_id="c", content="reply")
     await ch.send(out)
     assert ch.sent[0].content == "reply"
+
+
+def test_base_channel_default_spinner_noop():
+    """BaseChannel default start_spinner/stop_spinner should not raise."""
+    ch = FakeChannel()
+    ch.start_spinner("Thinking")  # no-op
+    ch.stop_spinner()  # no-op

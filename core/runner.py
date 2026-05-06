@@ -8,10 +8,16 @@ from typing import Callable, Awaitable
 
 from providers.base import LLMProvider, LLMResponse
 from tools.registry import ToolRegistry
-from session.compact import Microcompact, ToolResultBudget, SnipHistory
+from session.compact import Microcompact, ToolResultBudget, SnipHistory, Consolidator
 from .hook import AgentHook, HookContext
+from .structured_logger import StructuredLogger, timer, elapsed_ms
 
 logger = logging.getLogger(__name__)
+
+
+class TokenOverflowError(Exception):
+    """Context window exceeded even after governance."""
+    pass
 
 
 @dataclass
@@ -29,6 +35,8 @@ class AgentRunSpec:
     checkpoint_callback: Callable[[int, str], Awaitable[None]] | None = None
     injection_callback: Callable[[], Awaitable[list[dict] | None]] | None = None
     llm_timeout: float = 120.0  # seconds
+    consolidator_provider: LLMProvider | None = None
+    max_concurrent_tools: int = 5
 
 
 @dataclass
@@ -51,14 +59,56 @@ class AgentRunner:
         # 3-layer context defense
         self._microcompact = Microcompact(keep_recent=10)
         self._tool_budget = ToolResultBudget(max_chars=50_000)
-        self._snip = SnipHistory(max_tokens=180_000, chars_per_token=4.0)
+        self._slog = StructuredLogger(__name__)
 
-    def govern_context(self, messages: list[dict]) -> list[dict]:
-        """Apply 3-layer context defense before each LLM call."""
+    def govern_context(self, messages: list[dict], spec: AgentRunSpec | None = None) -> list[dict]:
+        """Apply sync context defense layers before each LLM call.
+
+        Layer 1: Microcompact (zero-cost local compaction)
+        Layer 2: Tool Result Budget (truncate oversized results)
+        Layer 3: Snip History (token-budget trimming, dynamic from spec)
+        """
         messages = self._microcompact.compact(messages)
         messages = self._tool_budget.apply(messages)
-        messages = self._snip.snip(messages)
+
+        # Layer 3: dynamic token budget from spec (90% of context_window)
+        context_window = spec.context_window_tokens if spec else 200_000
+        max_tokens = int(context_window * 0.9)
+        snip = SnipHistory(max_tokens=max_tokens, chars_per_token=4.0)
+        messages = snip.snip(messages)
+
         return messages
+
+    async def consolidate_if_needed(self, messages: list[dict], spec: AgentRunSpec) -> list[dict]:
+        """Layer 4: Consolidator — LLM-powered summary compression when still over budget."""
+        if not spec.consolidator_provider:
+            return messages
+
+        context_window = spec.context_window_tokens
+        max_chars = int(context_window * 4.0)
+        total_chars = sum(self._estimate_chars(m) for m in messages)
+
+        if total_chars <= max_chars:
+            return messages
+
+        try:
+            consolidator = Consolidator(spec.consolidator_provider)
+            target_tokens = int(context_window * 0.5)
+            messages = await consolidator.consolidate(messages, target_tokens=target_tokens)
+            logger.info("Consolidator compressed messages to fit context window")
+        except Exception as e:
+            logger.warning(f"Consolidator failed, using SnipHistory results: {e}")
+
+        return messages
+
+    def _estimate_chars(self, msg: dict) -> int:
+        import json
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            return sum(len(json.dumps(b, ensure_ascii=False)) for b in content)
+        return len(json.dumps(content, ensure_ascii=False))
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         messages = list(spec.messages)
@@ -74,10 +124,21 @@ class AgentRunner:
                 spec.hook.before_iteration(ctx)
 
             # Apply context governance before LLM call
-            messages = self.govern_context(messages)
+            messages = self.govern_context(messages, spec)
+            messages = await self.consolidate_if_needed(messages, spec)
+
+            # If messages are still too large after all governance, raise for retry layer
+            total_chars = sum(self._estimate_chars(m) for m in messages)
+            if total_chars > spec.context_window_tokens * 4:
+                raise TokenOverflowError(
+                    f"Context still exceeds {spec.context_window_tokens} tokens after governance"
+                )
 
             # LLM call with timeout
             tool_schemas = spec.tools.list_schemas()
+            model_name = spec.model or "default"
+            self._slog.llm_call_start(model_name, len(messages))
+            llm_start = timer()
             try:
                 response = await asyncio.wait_for(
                     spec.provider.chat_completion(
@@ -89,7 +150,15 @@ class AgentRunner:
                     ),
                     timeout=spec.llm_timeout,
                 )
+                self._slog.llm_call_end(
+                    model_name,
+                    response.usage.get("input_tokens", 0),
+                    response.usage.get("output_tokens", 0),
+                    elapsed_ms(llm_start),
+                    response.stop_reason,
+                )
             except asyncio.TimeoutError:
+                self._slog.llm_call_error(model_name, "timeout", elapsed_ms(llm_start))
                 logger.warning(f"LLM call timed out after {spec.llm_timeout}s")
                 return AgentRunResult(
                     content="(LLM request timed out — the context may be too long. Try sending a shorter message.)",
@@ -160,8 +229,24 @@ class AgentRunner:
 
                 ctx.tool_calls = response.tool_calls
 
-                # execute tools
-                for i, tool_call in enumerate(response.tool_calls):
+                # execute tools — concurrent for 2+, sequential for 1
+                if len(response.tool_calls) >= 2:
+                    results = await self._execute_tools_concurrent(
+                        spec.tools, response.tool_calls, spec.max_concurrent_tools
+                    )
+                    for i, (tool_call, result) in enumerate(results):
+                        messages.append({
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": tool_call["id"],
+                                "content": result,
+                            }],
+                        })
+                        if spec.checkpoint_callback:
+                            await spec.checkpoint_callback(i, tool_call["name"])
+                else:
+                    tool_call = response.tool_calls[0]
                     result = await self._execute_tool(spec.tools, tool_call)
                     messages.append({
                         "role": "user",
@@ -171,10 +256,8 @@ class AgentRunner:
                             "content": result,
                         }],
                     })
-
-                    # checkpoint after each tool
                     if spec.checkpoint_callback:
-                        await spec.checkpoint_callback(i, tool_call["name"])
+                        await spec.checkpoint_callback(0, tool_call["name"])
 
                 ctx.tool_results = [
                     m for m in messages[-len(response.tool_calls):]
@@ -243,12 +326,36 @@ class AgentRunner:
         name = tool_call["name"]
         tool = registry.get(name)
         if tool is None:
+            self._slog.tool_execute(name, 0, False, error=f"unknown tool '{name}'")
             return f"Error: unknown tool '{name}'"
+        tool_start = timer()
         try:
             result = await tool.execute(**tool_call.get("input", {}))
+            self._slog.tool_execute(name, elapsed_ms(tool_start), True)
             return result if isinstance(result, str) else json.dumps(result)
         except Exception as e:
+            self._slog.tool_execute(name, elapsed_ms(tool_start), False, error=str(e))
             return f"Error executing tool '{name}': {e}"
+
+    async def _execute_single_tool_safe(self, registry: ToolRegistry, tool_call: dict) -> tuple[dict, str]:
+        """Execute a single tool and return (tool_call, result). Isolates errors."""
+        try:
+            result = await self._execute_tool(registry, tool_call)
+        except Exception as e:
+            result = f"Error executing tool '{tool_call['name']}': {e}"
+        return tool_call, result
+
+    async def _execute_tools_concurrent(
+        self, registry: ToolRegistry, tool_calls: list[dict], max_concurrent: int
+    ) -> list[tuple[dict, str]]:
+        """Execute multiple tools concurrently with a concurrency limit."""
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def bounded_execute(tc: dict) -> tuple[dict, str]:
+            async with semaphore:
+                return await self._execute_single_tool_safe(registry, tc)
+
+        return await asyncio.gather(*[bounded_execute(tc) for tc in tool_calls])
 
     def _build_assistant_message(self, response: LLMResponse) -> dict:
         """Build an assistant message dict from LLMResponse."""

@@ -5,15 +5,11 @@ import logging
 from typing import Callable, Awaitable, TypeVar
 
 from providers.base import LLMProvider, LLMResponse
+from core.runner import TokenOverflowError
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-
-class TokenOverflowError(Exception):
-    """Context window exceeded."""
-    pass
 
 
 class RateLimitError(Exception):

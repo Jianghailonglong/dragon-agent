@@ -11,6 +11,7 @@ class HeartbeatService:
     """
     Periodic heartbeat check: determines if the agent needs to proactively speak.
     Runs on a configurable interval, calling a check function.
+    Also triggers delivery queue retry on each cycle.
     """
 
     def __init__(
@@ -18,10 +19,12 @@ class HeartbeatService:
         interval_seconds: float = 60.0,
         check_fn: Callable[[], Awaitable[bool]] | None = None,
         on_heartbeat: Callable[[], Awaitable[None]] | None = None,
+        delivery_queue: object | None = None,
     ) -> None:
         self._interval = interval_seconds
         self._check_fn = check_fn
         self._on_heartbeat = on_heartbeat
+        self._delivery_queue = delivery_queue
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -48,6 +51,15 @@ class HeartbeatService:
     async def _loop(self) -> None:
         while self._running:
             try:
+                # Retry pending deliveries on every heartbeat
+                if self._delivery_queue and hasattr(self._delivery_queue, 'retry_pending'):
+                    try:
+                        retried = await self._delivery_queue.retry_pending()
+                        if retried:
+                            logger.info(f"Heartbeat: retried {retried} pending deliveries")
+                    except Exception as e:
+                        logger.warning(f"Heartbeat delivery retry failed: {e}")
+
                 should_act = True
                 if self._check_fn:
                     should_act = await self._check_fn()

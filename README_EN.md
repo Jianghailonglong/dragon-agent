@@ -78,8 +78,11 @@ Edit files under `workspace/`:
 │              Orchestration Layer                  │
 │    Named Lanes │ SubagentManager │ Heartbeat/Cron │
 ├──────────────────────────────────────────────────┤
+│              Delivery Layer                       │
+│    Write-Ahead Queue │ Persist │ Auto-Retry       │
+├──────────────────────────────────────────────────┤
 │              Resilience Layer                     │
-│    3-Layer Retry │ Checkpoint │ Delivery Queue    │
+│    3-Layer Retry │ Checkpoint │ Safety Guard      │
 ├──────────────────────────────────────────────────┤
 │              Intelligence Layer                   │
 │    ContextBuilder (8-layer) │ Memory │ Skills     │
@@ -194,12 +197,14 @@ dragon-agent/
 ├── providers/      # LLMProvider, AnthropicProvider, factory
 ├── session/        # Session (JSONL), SessionManager, compact
 ├── channels/       # BaseChannel, CLI, Telegram, Feishu, WeChat
-├── gateway/        # MessageBus, 5-Tier Router
+├── gateway/        # MessageBus, 5-Tier Router, MessageBus
 ├── intelligence/   # ContextBuilder, Memory, Skills, Dream
-├── resilience/     # Checkpoint, Retry, Delivery, Safety
+├── resilience/     # Checkpoint, Retry, Safety
+├── delivery/       # Write-Ahead Delivery Queue
 ├── orchestration/  # Lanes, Heartbeat, Cron, Subagent
 ├── config/         # Schema, Loader (.env + YAML)
 ├── workspace/      # Agent persona files
+├── docs/           # Documentation
 ├── cli/            # CLI entry point
 ├── web/            # Web UI
 └── tests/          # Unit tests

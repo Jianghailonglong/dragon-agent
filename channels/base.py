@@ -25,5 +25,11 @@ class BaseChannel(ABC):
     async def send(self, msg: OutboundMessage) -> None:
         """Send an outbound message through this channel."""
 
+    def start_spinner(self, message: str = "Thinking") -> None:
+        """Show a loading indicator (optional, no-op by default)."""
+
+    def stop_spinner(self) -> None:
+        """Hide the loading indicator (optional, no-op by default)."""
+
     async def disconnect(self) -> None:
         """Clean up channel resources."""

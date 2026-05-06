@@ -174,9 +174,12 @@ class Consolidator:
             max_tokens=1024,
         )
 
+        # Handle empty or None response gracefully
+        summary_text = resp.content if resp and resp.content else "[Summary unavailable]"
+
         summary_msg = {
             "role": "user",
-            "content": f"[Conversation summary]\n{resp.content}",
+            "content": f"[Conversation summary]\n{summary_text}",
         }
 
         return [summary_msg] + recent_messages
